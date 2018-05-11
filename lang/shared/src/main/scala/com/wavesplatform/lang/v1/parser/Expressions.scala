@@ -17,5 +17,6 @@ object Expressions {
   case object TRUE                                                 extends EXPR
   case object FALSE                                                extends EXPR
   case class FUNCTION_CALL(functionName: String, args: List[EXPR]) extends EXPR
+  case class INVALID(xs: String, next: EXPR)                       extends EXPR
 
 }

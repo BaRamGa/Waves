@@ -32,7 +32,7 @@ object Parser {
   private val falseP: P[FALSE.type]  = P("false").map(_ => FALSE)
   private val bracesP: P[EXPR]       = P("(" ~ expr ~ ")")
   private val curlyBracesP: P[EXPR]  = P("{" ~ expr ~ "}")
-  private val letP: P[LET]           = P("let" ~ varName ~ "=" ~ expr).map { case ((x, y)) => LET(x, y) }
+  private val letP: P[LET]           = P("let" ~ varName ~ "=" ~ expr).map { case (x, y) => LET(x, y) }.log("let")
   private val refP: P[REF]           = P(varName).map(x => REF(x))
   private val ifP: P[IF]             = P("if" ~ bracesP ~ "then" ~ expr ~ "else" ~ expr).map { case (x, y, z) => IF(x, y, z) }
 
@@ -42,9 +42,9 @@ object Parser {
     case (functionName, args) => FUNCTION_CALL(functionName, args.toList)
   }
 
-  private val extractableAtom: P[EXPR] = P(curlyBracesP | bracesP | functionCallP | refP)
+  private val extractableAtom: P[EXPR] = P(curlyBracesP | bracesP | functionCallP | refP).log("extractableAtom")
 
-  private val maybeGetterP: P[EXPR] = P(extractableAtom ~~ ("." ~~ varName).?).map {
+  private val maybeGetterP: P[EXPR] = P(extractableAtom ~ ("." ~~ varName).?).map {
     case (e, f) => f.fold(e)(GETTER(e, _))
   }
 
@@ -61,20 +61,31 @@ object Parser {
   private val stringP: P[CONST_STRING] =
     P("\"" ~~ (CharsWhile(!"\"\\".contains(_: Char)) | escapedUnicodeSymbolP).rep.! ~~ "\"").map(CONST_STRING)
 
-  private val block: P[EXPR] = P(letP ~ expr).map(Function.tupled(BLOCK.apply))
+  private val block: P[EXPR] = P(letP ~ expr).map(Function.tupled(BLOCK.apply)).log("block")
 
-  private val atom      = P(ifP | byteVectorP | stringP | numberP | trueP | falseP | block | maybeGetterP)
-  private lazy val expr = P(binaryOp(opsByPriority) | atom)
+  private val invalidSeq: P[String] = AnyChars(1).!.log("invalidSeq")
+  private val invalid: P[INVALID] = P(invalidSeq ~ expr).log("invalid").map {
+    case (xs, next) => foldInvalid(xs, next)
+  }
+
+  private def foldInvalid(xs: String, next: EXPR): INVALID = next match {
+    case INVALID(nextXs, nextNext) => foldInvalid(xs + nextXs, nextNext)
+    case x                         => INVALID(xs, x)
+  }
+
+  private val atom = P(ifP | byteVectorP | stringP | numberP | trueP | falseP | block | maybeGetterP | invalid).log("atom")
+
+  private lazy val expr = P(binaryOp(opsByPriority) | atom).log("expr")
 
   private def binaryOp(rest: List[(String, BinaryOperation)]): P[EXPR] = rest match {
     case Nil => atom
     case (lessPriorityOp, kind) :: restOps =>
       val operand = binaryOp(restOps)
       P(operand ~ (lessPriorityOp.!.map(_ => kind) ~ operand).rep()).map {
-        case ((left: EXPR, r: Seq[(BinaryOperation, EXPR)])) =>
+        case (left: EXPR, r: Seq[(BinaryOperation, EXPR)]) =>
           r.foldLeft(left) { case (acc, (currKind, currOperand)) => BINARY_OP(acc, currKind, currOperand) }
       }
   }
 
-  def apply(str: String): core.Parsed[EXPR, Char, String] = P(Start ~ expr ~ End).parse(str)
+  def apply(str: String): core.Parsed[Seq[EXPR], Char, String] = P(Start ~ expr.rep(min = 1) ~ End).parse(str)
 }

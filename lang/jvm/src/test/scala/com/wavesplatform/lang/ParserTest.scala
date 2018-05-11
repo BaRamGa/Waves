@@ -15,7 +15,18 @@ import scorex.crypto.encode.{Base58 => ScorexBase58}
 
 class ParserTest extends PropSpec with PropertyChecks with Matchers with ScriptGenParser with NoShrink {
 
-  def parse(x: String): EXPR = Parser(x) match {
+  private def parseOne(x: String): EXPR = Parser(x) match {
+    case Success(r, _) =>
+      if (r.size > 1) throw new TestFailedException(s"Expected 1 expression, but got ${r.size}: $r", 0)
+      else r.head
+    case e @ Failure(_, i, _) =>
+      println(
+        s"Can't parse (len=${x.length}): <START>\n$x\n<END>\nError: $e\nPosition ($i): '${x.slice(i, i + 1)}'\nTraced:\n${e.extra.traced.fullStack
+          .mkString("\n")}")
+      throw new TestFailedException("Test failed", 0)
+  }
+
+  private def parseAll(x: String): Seq[EXPR] = Parser(x) match {
     case Success(r, _) => r
     case e @ Failure(_, i, _) =>
       println(
@@ -24,21 +35,51 @@ class ParserTest extends PropSpec with PropertyChecks with Matchers with ScriptG
       throw new TestFailedException("Test failed", 0)
   }
 
-  def isParsed(x: String): Boolean = Parser(x) match {
+  private def isParsed(x: String): Boolean = Parser(x) match {
     case Success(_, _)    => true
     case Failure(_, _, _) => false
   }
 
-  def genElementCheck(gen: Gen[EXPR]): Unit = {
+  private def genElementCheck(gen: Gen[EXPR]): Unit = {
     val testGen: Gen[(EXPR, String)] = for {
       expr <- gen
       str  <- toString(expr)
     } yield (expr, str)
 
     forAll(testGen) {
-      case ((expr, str)) =>
-        parse(str) shouldBe expr
+      case (expr, str) =>
+        parseOne(str) shouldBe expr
     }
+  }
+
+  property("should produce INVALID on invalid input") {
+    val script =
+      """let C = 1
+        |# /
+        |true""".stripMargin
+    parseOne(script) shouldBe BLOCK(
+      LET("C", CONST_LONG(1)),
+      INVALID(
+        "#/",
+        TRUE
+      )
+    )
+  }
+
+  property("show parse all input including INVALID") {
+    val script =
+      """let C = 1
+        |foo
+        |#@2
+        |true""".stripMargin
+    parseAll(script) shouldBe Seq(
+      BLOCK(
+        LET("C", CONST_LONG(1)),
+        REF("foo")
+      ),
+      INVALID("#@", CONST_LONG(2)),
+      TRUE
+    )
   }
 
   property("all types of multiline expressions") {
@@ -58,15 +99,19 @@ class ParserTest extends PropSpec with PropertyChecks with Matchers with ScriptG
   }
 
   property("priority in binary expressions") {
-    parse("1 == 0 || 3 == 2") shouldBe BINARY_OP(BINARY_OP(CONST_LONG(1), EQ_OP, CONST_LONG(0)),
-                                                 OR_OP,
-                                                 BINARY_OP(CONST_LONG(3), EQ_OP, CONST_LONG(2)))
-    parse("3 + 2 > 2 + 1") shouldBe BINARY_OP(BINARY_OP(CONST_LONG(3), SUM_OP, CONST_LONG(2)), GT_OP, BINARY_OP(CONST_LONG(2), SUM_OP, CONST_LONG(1)))
-    parse("1 >= 0 || 3 > 2") shouldBe BINARY_OP(BINARY_OP(CONST_LONG(1), GE_OP, CONST_LONG(0)), OR_OP, BINARY_OP(CONST_LONG(3), GT_OP, CONST_LONG(2)))
+    parseOne("1 == 0 || 3 == 2") shouldBe BINARY_OP(BINARY_OP(CONST_LONG(1), EQ_OP, CONST_LONG(0)),
+                                                    OR_OP,
+                                                    BINARY_OP(CONST_LONG(3), EQ_OP, CONST_LONG(2)))
+    parseOne("3 + 2 > 2 + 1") shouldBe BINARY_OP(BINARY_OP(CONST_LONG(3), SUM_OP, CONST_LONG(2)),
+                                                 GT_OP,
+                                                 BINARY_OP(CONST_LONG(2), SUM_OP, CONST_LONG(1)))
+    parseOne("1 >= 0 || 3 > 2") shouldBe BINARY_OP(BINARY_OP(CONST_LONG(1), GE_OP, CONST_LONG(0)),
+                                                   OR_OP,
+                                                   BINARY_OP(CONST_LONG(3), GT_OP, CONST_LONG(2)))
   }
 
   property("bytestr expressions") {
-    parse("false || sigVerify(base58'333', base58'222', base58'111')") shouldBe BINARY_OP(
+    parseOne("false || sigVerify(base58'333', base58'222', base58'111')") shouldBe BINARY_OP(
       FALSE,
       OR_OP,
       FUNCTION_CALL(
@@ -81,19 +126,19 @@ class ParserTest extends PropSpec with PropertyChecks with Matchers with ScriptG
   }
 
   property("base58") {
-    parse("base58'bQbp'") shouldBe CONST_BYTEVECTOR(ByteVector("foo".getBytes))
-    parse("base58''") shouldBe CONST_BYTEVECTOR(ByteVector.empty)
+    parseOne("base58'bQbp'") shouldBe CONST_BYTEVECTOR(ByteVector("foo".getBytes))
+    parseOne("base58''") shouldBe CONST_BYTEVECTOR(ByteVector.empty)
     isParsed("base58' bQbp'\n") shouldBe false
   }
 
   property("string is consumed fully") {
-    parse(""" "   fooo    bar" """) shouldBe CONST_STRING("   fooo    bar")
+    parseOne(""" "   fooo    bar" """) shouldBe CONST_STRING("   fooo    bar")
   }
 
   property("string literal with unicode chars") {
     val stringWithUnicodeChars = "❤✓☀★☂♞☯☭☢€☎∞❄♫\u20BD"
 
-    parse(
+    parseOne(
       s"""
          |
          | "$stringWithUnicodeChars"
@@ -133,27 +178,27 @@ class ParserTest extends PropSpec with PropertyChecks with Matchers with ScriptG
         | AC + BC+ CC >= 2
         |
       """.stripMargin
-    parse(script) // gets parsed, but later will fail on type check!
+    parseOne(script) // gets parsed, but later will fail on type check!
   }
 
   property("function call") {
-    parse("FOO(1,2)".stripMargin) shouldBe FUNCTION_CALL("FOO", List(CONST_LONG(1), CONST_LONG(2)))
-    parse("FOO(X)".stripMargin) shouldBe FUNCTION_CALL("FOO", List(REF("X")))
+    parseOne("FOO(1,2)".stripMargin) shouldBe FUNCTION_CALL("FOO", List(CONST_LONG(1), CONST_LONG(2)))
+    parseOne("FOO(X)".stripMargin) shouldBe FUNCTION_CALL("FOO", List(REF("X")))
   }
 
   property("isDefined/extract") {
-    parse("isDefined(X)") shouldBe FUNCTION_CALL("isDefined", List(REF("X")))
-    parse("if(isDefined(X)) then extract(X) else Y") shouldBe IF(FUNCTION_CALL("isDefined", List(REF("X"))),
-                                                                 FUNCTION_CALL("extract", List(REF("X"))),
-                                                                 REF("Y"))
+    parseOne("isDefined(X)") shouldBe FUNCTION_CALL("isDefined", List(REF("X")))
+    parseOne("if(isDefined(X)) then extract(X) else Y") shouldBe IF(FUNCTION_CALL("isDefined", List(REF("X"))),
+                                                                    FUNCTION_CALL("extract", List(REF("X"))),
+                                                                    REF("Y"))
   }
 
   property("getter") {
     isParsed("xxx   .yyy") shouldBe false
     isParsed("xxx.  yyy") shouldBe false
 
-    parse("xxx.yyy") shouldBe GETTER(REF("xxx"), "yyy")
-    parse(
+    parseOne("xxx.yyy") shouldBe GETTER(REF("xxx"), "yyy")
+    parseOne(
       """
         |
         | xxx.yyy
@@ -161,8 +206,8 @@ class ParserTest extends PropSpec with PropertyChecks with Matchers with ScriptG
       """.stripMargin
     ) shouldBe GETTER(REF("xxx"), "yyy")
 
-    parse("xxx(yyy).zzz") shouldBe GETTER(FUNCTION_CALL("xxx", List(REF("yyy"))), "zzz")
-    parse(
+    parseOne("xxx(yyy).zzz") shouldBe GETTER(FUNCTION_CALL("xxx", List(REF("yyy"))), "zzz")
+    parseOne(
       """
         |
         | xxx(yyy).zzz
@@ -170,8 +215,8 @@ class ParserTest extends PropSpec with PropertyChecks with Matchers with ScriptG
       """.stripMargin
     ) shouldBe GETTER(FUNCTION_CALL("xxx", List(REF("yyy"))), "zzz")
 
-    parse("(xxx(yyy)).zzz") shouldBe GETTER(FUNCTION_CALL("xxx", List(REF("yyy"))), "zzz")
-    parse(
+    parseOne("(xxx(yyy)).zzz") shouldBe GETTER(FUNCTION_CALL("xxx", List(REF("yyy"))), "zzz")
+    parseOne(
       """
         |
         | (xxx(yyy)).zzz
@@ -179,8 +224,8 @@ class ParserTest extends PropSpec with PropertyChecks with Matchers with ScriptG
       """.stripMargin
     ) shouldBe GETTER(FUNCTION_CALL("xxx", List(REF("yyy"))), "zzz")
 
-    parse("{xxx(yyy)}.zzz") shouldBe GETTER(FUNCTION_CALL("xxx", List(REF("yyy"))), "zzz")
-    parse(
+    parseOne("{xxx(yyy)}.zzz") shouldBe GETTER(FUNCTION_CALL("xxx", List(REF("yyy"))), "zzz")
+    parseOne(
       """
         |
         | {
@@ -190,7 +235,7 @@ class ParserTest extends PropSpec with PropertyChecks with Matchers with ScriptG
       """.stripMargin
     ) shouldBe GETTER(FUNCTION_CALL("xxx", List(REF("yyy"))), "zzz")
 
-    parse(
+    parseOne(
       """
         |
         | {
@@ -208,7 +253,7 @@ class ParserTest extends PropSpec with PropertyChecks with Matchers with ScriptG
     val encodedText   = ScorexBase58.encode(text.getBytes)
 
     for (f <- hashFunctions) {
-      parse(
+      parseOne(
         s"""
            |
            |$f(base58'$encodedText')

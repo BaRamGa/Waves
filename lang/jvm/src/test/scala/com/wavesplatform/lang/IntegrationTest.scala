@@ -14,8 +14,9 @@ class IntegrationTest extends PropSpec with PropertyChecks with ScriptGen with M
 
   private def eval[T: TypeInfo](code: String) = {
     val untyped = Parser(code).get.value
-    val ctx     = PureContext.instance
-    val typed   = CompilerV1(CompilerContext.fromEvaluationContext(ctx), untyped)
+    require(untyped.size == 1)
+    val ctx   = PureContext.instance
+    val typed = CompilerV1(CompilerContext.fromEvaluationContext(ctx), untyped.head)
     typed.flatMap(EvaluatorV1[T](ctx, _))
   }
 
@@ -59,7 +60,7 @@ class IntegrationTest extends PropSpec with PropertyChecks with ScriptGen with M
 
     forAll(for {
       (expr, _) <- BOOLgen(50)
-      str  <- toString(expr)
+      str       <- toString(expr)
     } yield str) {
       case str =>
         eval[Boolean](s"$str || true") shouldBe Right(true)
